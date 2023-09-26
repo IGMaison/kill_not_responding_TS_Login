@@ -28,6 +28,7 @@ set "Query=SELECT host_process_id FROM sys.dm_exec_sessions WHERE program_name =
 cd !TSClientDir!
 set "CheckToBeClosed="
 :SearchToBeClosed
+
 REM Определение PID запущенных клиентов в Windows этого компа
 set "WPISs="
 for /f "tokens=2" %%a in ('tasklist /FI "IMAGENAME eq TSClient.exe" /NH ^| findstr /i "TSClient.exe"') do (
@@ -53,38 +54,68 @@ echo Процессы TSClient.exe на сервере: !SPIDs!
 
 REM Шаг 3: Сравнение PIDs из двух списков и нахождение тех, которые присутствуют в винде и отсутствуют при определении через сервер.
 set "ToBeClosed="
-for %%c in (%WPISs%) do (
-    echo %SPIDs% | findstr /i "%%c" > nul
-    if errorlevel 1 (
-        REM Шаг 4: Нахождение чисел PID, которые есть в WPISs и нет в SPIDs
-        set "ToBeClosed=!ToBeClosed! %%c"
+for %%i in (%WPISs%) do (
+    set "found=false"
+    for %%j in (%SPIDs%) do (
+        if %%i==%%j (
+            set "found=true"
+        )
+    )
+    if "!found!"=="false" (
+        set "ToBeClosed= !ToBeClosed! %%i"
     )
 )
-
-REM echo ToBeClosed: !ToBeClosed!
-
 REM Считаем, сколько непарных процессов
 set "Count=0"
 for %%A in (%ToBeClosed%) do (
     set /a Count+=1
 )
 echo Найдено непарных процессов -- !Count! :
+echo !ToBeClosed!
+if "!Count!" GTR "0" (
 
-if !Count!==1 (
     if not defined CheckToBeClosed (
-        REM При отсутствии на сервере одного и только одного из запущенных в винде процессов перепроверяем, что эта ситуация сохранилась через !Timeout! сек.
+        REM При отсутствии на сервере некоторых из запущенных в винде процессов перепроверяем, что уже имеющийся у нас их перечень не уменьшился через !Timeout! сек.
         set "CheckToBeClosed=!ToBeClosed!"
-        echo !CheckToBeClosed!
-        timeout /t !Timeout! > nul
         echo Повторный поиск....
+        timeout /t !Timeout! > nul
         goto SearchToBeClosed
     ) else (
-        echo Повторно найденные непарные процессы:
-        echo !ToBeClosed!
-        if !CheckToBeClosed!==!ToBeClosed! (
-        echo Изменений в непарных процессах не найдено
-            REM Если проверенная ранее ситуация сохранилась, принудительно закрываем процесс с найденным PID и добавляем инфу в файл !OAErrFile!
-            for %%A in (!ToBeClosed!) do (
+        echo Ищем,сравнив с найденными непарными процессами, исчезли ли какие-нибудь из уже составленного списка непарных процессов
+
+        set "NewCheckToBeClosed="
+        for %%i in (!CheckToBeClosed!) do (
+            for %%j in (!ToBeClosed!) do (
+                if %%i==%%j (
+                    set "NewCheckToBeClosed=!NewCheckToBeClosed! %%i"
+                )
+            )
+        )
+
+        REM Проверяем изменился ли список непарных после предыдущего действия
+        set "matchingValues=true"
+
+        for %%i in (!CheckToBeClosed!) do (
+            set "found=false"
+            for %%j in (!NewCheckToBeClosed!) do (
+                if %%i==%%j (
+                    set "found=true"
+                )
+            )
+            if "!found!"=="false" (
+                set "matchingValues=false"
+                goto changed
+            )
+        )
+
+        :changed
+        echo Обновлённый список непарных процессов для проверки:
+        echo !NewCheckToBeClosed!
+
+        if "!matchingValues!"=="true" (
+            echo Изменений в непарных процессах не найдено
+            REM Если изначально полученный список непарных больше не уменьшается, принудительно закрываем процессы с PID этого списка и добавляем инфу в файл !OAErrFile!
+            for %%A in (!CheckToBeClosed!) do (
                 echo ...записываем лог в !OAErrFile!
                 set "Log="
                 for /f "skip=1 tokens=*" %%B in ('wmic process where "ProcessID=%%A" get CommandLine^,ProcessId') do (
@@ -93,10 +124,15 @@ if !Count!==1 (
                 echo %date% %time% - Был закрыт процесс !Log! >> %OAErrFile%
                 echo Закрываем процесс:
                 echo !Log!
-                echo и ждём !Timeout! сек....
                 taskkill /F /PID %%A > nul
-                timeout /t !Timeout! > nul
             )
+            echo и ждём !Timeout! сек....
+            timeout /t !Timeout! > nul
+        ) else (
+            echo Список непарных процессов уменьшился. Повторный поиск....
+            timeout /t !Timeout! > nul
+            set "CheckToBeClosed=!NewCheckToBeClosed!"
+            goto SearchToBeClosed
         )
     )
 )
